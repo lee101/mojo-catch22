@@ -40,6 +40,8 @@ def main():
     ami = np.ascontiguousarray(rng.normal(size=200_000))
     print("| case | mojo-catch22 | pycatch22 | ratio |")
     print("| --- | ---: | ---: | ---: |")
+    benchmark("DN_Mean (2M)", lambda: mojo.DN_Mean(large), lambda: reference.DN_Mean(large.tolist()))
+    benchmark("DN_Spread_Std (2M)", lambda: mojo.DN_Spread_Std(large), lambda: reference.DN_Spread_Std(large.tolist()))
     benchmark("CO_trev_1_num (2M)", lambda: mojo.CO_trev_1_num(large), lambda: reference.CO_trev_1_num(large.tolist()))
     benchmark("MD_hrv_classic_pnn40 (2M)", lambda: mojo.MD_hrv_classic_pnn40(large), lambda: reference.MD_hrv_classic_pnn40(large.tolist()))
     benchmark("CO_HistogramAMI_even_2_5 (200k)", lambda: mojo.CO_HistogramAMI_even_2_5(ami), lambda: reference.CO_HistogramAMI_even_2_5(ami.tolist()))

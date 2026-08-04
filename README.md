@@ -48,14 +48,18 @@ calls and include public-API conversion for both libraries.
 
 | case | mojo-catch22 | pycatch22 | ratio |
 | --- | ---: | ---: | ---: |
-| CO_trev_1_num (2M) | 22.85 ms | 228.81 ms | 10.01x faster |
-| MD_hrv_classic_pnn40 (2M) | 19.85 ms | 164.68 ms | 8.30x faster |
-| CO_HistogramAMI_even_2_5 (200k) | 7.64 ms | 23.87 ms | 3.13x faster |
-| CO_f1ecac (4,096) | 0.13 ms | 3.04 ms | 23.71x faster |
+| DN_Mean (2M) | 3.47 ms | 213.34 ms | 61.53x faster |
+| DN_Spread_Std (2M) | 15.05 ms | 255.55 ms | 16.98x faster |
+| CO_trev_1_num (2M) | 29.86 ms | 274.87 ms | 9.21x faster |
+| MD_hrv_classic_pnn40 (2M) | 30.35 ms | 277.76 ms | 9.15x faster |
+| CO_HistogramAMI_even_2_5 (200k) | 7.21 ms | 24.43 ms | 3.39x faster |
+| CO_f1ecac (4,096) | 0.17 ms | 3.67 ms | 22.08x faster |
 
 ## How it works
 
 The Mojo kernels live in `src/capi.mojo` and are built as one shared library.
+Contiguous reductions use the host's native Float64 SIMD width with scalar tails;
+independent accumulators are reduced once after the vector loop.
 The Python wrapper validates the array, retains its contiguous `float64` buffer
 for the whole `ctypes` call, and passes its address and element count to the C
 ABI. Kernels do not allocate or retain the caller's memory. Autocorrelation is

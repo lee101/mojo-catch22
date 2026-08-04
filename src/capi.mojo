@@ -14,18 +14,34 @@ def invalid(a: Ptr, n: Int) -> Bool:
 
 
 def mean(a: Ptr, n: Int) -> Float64:
-    var total = 0.0
-    for i in range(n):
+    comptime W = simd_width_of[DType.float64]()
+    var acc = SIMD[DType.float64, W](0.0)
+    var i = 0
+    while i + W <= n:
+        acc += a.load[width=W](i)
+        i += W
+    var total = acc.reduce_add()
+    while i < n:
         total += a[i]
+        i += 1
     return total / Float64(n)
 
 
 def stddev(a: Ptr, n: Int) -> Float64:
+    comptime W = simd_width_of[DType.float64]()
     var m = mean(a, n)
-    var total = 0.0
-    for i in range(n):
-        var d = a[i] - m
-        total += d * d
+    var means = SIMD[DType.float64, W](m)
+    var acc = SIMD[DType.float64, W](0.0)
+    var i = 0
+    while i + W <= n:
+        var d = a.load[width=W](i) - means
+        acc += d * d
+        i += W
+    var total = acc.reduce_add()
+    while i < n:
+        var tail = a[i] - m
+        total += tail * tail
+        i += 1
     return sqrt(total / Float64(n - 1))
 
 
@@ -327,10 +343,18 @@ def first_min_ac(a: Ptr, n: Int) -> Float64:
 def trev(a: Ptr, n: Int) -> Float64:
     if invalid(a, n):
         return 0.0 / 0.0
-    var total = 0.0
-    for i in range(n - 1):
-        var d = a[i + 1] - a[i]
-        total += d * d * d
+    comptime W = simd_width_of[DType.float64]()
+    var acc = SIMD[DType.float64, W](0.0)
+    var i = 0
+    while i + W < n:
+        var d = a.load[width=W](i + 1) - a.load[width=W](i)
+        acc += d * d * d
+        i += W
+    var total = acc.reduce_add()
+    while i < n - 1:
+        var tail = a[i + 1] - a[i]
+        total += tail * tail * tail
+        i += 1
     return total / Float64(n - 1)
 
 
