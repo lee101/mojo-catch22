@@ -48,12 +48,12 @@ calls and include public-API conversion for both libraries.
 
 | case | mojo-catch22 | pycatch22 | ratio |
 | --- | ---: | ---: | ---: |
-| DN_Mean (2M) | 3.47 ms | 213.34 ms | 61.53x faster |
-| DN_Spread_Std (2M) | 15.05 ms | 255.55 ms | 16.98x faster |
-| CO_trev_1_num (2M) | 29.86 ms | 274.87 ms | 9.21x faster |
-| MD_hrv_classic_pnn40 (2M) | 30.35 ms | 277.76 ms | 9.15x faster |
-| CO_HistogramAMI_even_2_5 (200k) | 7.21 ms | 24.43 ms | 3.39x faster |
-| CO_f1ecac (4,096) | 0.17 ms | 3.67 ms | 22.08x faster |
+| DN_Mean (2M) | 1.50 ms | 153.68 ms | 102.48x faster |
+| DN_Spread_Std (2M) | 3.29 ms | 160.08 ms | 48.69x faster |
+| CO_trev_1_num (2M) | 22.09 ms | 260.58 ms | 11.80x faster |
+| MD_hrv_classic_pnn40 (2M) | 22.71 ms | 188.25 ms | 8.29x faster |
+| CO_HistogramAMI_even_2_5 (200k) | 1.60 ms | 18.56 ms | 11.63x faster |
+| CO_f1ecac (4,096) | 0.11 ms | 2.94 ms | 25.87x faster |
 
 ## How it works
 
@@ -62,9 +62,16 @@ Contiguous reductions use the host's native Float64 SIMD width with scalar tails
 independent accumulators are reduced once after the vector loop.
 The Python wrapper validates the array, retains its contiguous `float64` buffer
 for the whole `ctypes` call, and passes its address and element count to the C
-ABI. Kernels do not allocate or retain the caller's memory. Autocorrelation is
-calculated directly over that buffer; unsupported upstream features are not
-silently substituted.
+ABI. The AMI kernel applies z-score scaling to its bin boundaries instead of
+allocating a normalized copy, and classifies bins with SIMD before reducing its
+25 counters. Kernels do not allocate or retain the caller's memory.
+Autocorrelation is calculated directly over that buffer; unsupported upstream
+features are not silently substituted.
+
+GPU offload is intentionally omitted. The covered kernels are streaming
+reductions, comparisons, and small histograms with arithmetic intensity below
+the roughly 2-flop-per-byte point where device transfer and launch overhead can
+be justified.
 
 ## License
 

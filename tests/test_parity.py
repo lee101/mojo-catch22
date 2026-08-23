@@ -5,7 +5,7 @@ import pytest
 
 import mojocatch22 as mojo
 import pycatch22 as reference
-from mojocatch22._lib import lib
+from mojocatch22._lib import f64, lib
 
 
 FEATURES = [
@@ -89,9 +89,10 @@ def test_noncontiguous_float64_input_is_copied_safely():
     assert mojo.CO_trev_1_num(x) == pytest.approx(reference.CO_trev_1_num(x.tolist()))
 
 
-def test_readonly_float64_input_is_copied_safely():
+def test_readonly_contiguous_input_stays_zero_copy():
     x = np.arange(20, dtype=np.float64)
     x.flags.writeable = False
+    assert f64(x) is x
     assert mojo.CO_trev_1_num(x) == pytest.approx(reference.CO_trev_1_num(x.tolist()))
 
 

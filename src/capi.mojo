@@ -1,6 +1,7 @@
 """Allocation-free C ABI kernels for the covered catch22 characteristics."""
 
 from std.math import exp, isnan, log, sqrt
+from std.memory import stack_allocation
 from std.sys.info import simd_width_of
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
@@ -158,151 +159,69 @@ def histogram_mode(a: Ptr, n: Int, bins: Int) -> Float64:
     return centers / Float64(ties)
 
 
-def ami_bin(value: Float64, lo: Float64, step: Float64) -> Int:
+def ami_bin(value: Float64, lo: Float64, step: Float64, padding: Float64) -> Int:
     for edge in range(6):
-        if value < lo + step * Float64(edge) - 0.1:
+        if value < lo + step * Float64(edge) - padding:
             return edge
     return 0
 
 
-def histogram_ami(a: Ptr, n: Int) -> Float64:
+def histogram_ami_count_range(
+    a: Ptr,
+    start: Int,
+    end: Int,
+    lo: Float64,
+    step: Float64,
+    padding: Float64,
+    counts: Pointer[Int, MutUntrackedOrigin],
+):
+    comptime W = simd_width_of[DType.float64]()
+    for bucket in range(25):
+        counts[bucket] = 0
+    var k = start
+    while k + W <= end:
+        var left_values = a.load[width=W](k)
+        var right_values = a.load[width=W](k + 2)
+        var left_bins = SIMD[DType.int64, W](0)
+        var right_bins = SIMD[DType.int64, W](0)
+        comptime for edge in range(4):
+            var threshold = SIMD[DType.float64, W](
+                lo + Float64(edge + 1) * step - padding
+            )
+            left_bins += left_values.ge(threshold).cast[DType.int64]()
+            right_bins += right_values.ge(threshold).cast[DType.int64]()
+        var joint_bins = left_bins * 5 + right_bins
+        comptime for lane in range(W):
+            counts[Int(joint_bins[lane])] += 1
+        k += W
+    while k < end:
+        var left = ami_bin(a[k], lo, step, padding)
+        var right = ami_bin(a[k + 2], lo, step, padding)
+        counts[(left - 1) * 5 + right - 1] += 1
+        k += 1
+
+
+def histogram_ami(a: Ptr, n: Int, padding: Float64) -> Float64:
     var lo = min_value(a, n)
-    var step = (max_value(a, n) - lo + 0.2) / 5.0
+    var step = (max_value(a, n) - lo + 2.0 * padding) / 5.0
     var total = Float64(n - 2)
-    var row1 = 0
-    var row2 = 0
-    var row3 = 0
-    var row4 = 0
-    var row5 = 0
-    var column1 = 0
-    var column2 = 0
-    var column3 = 0
-    var column4 = 0
-    var column5 = 0
-    var joint11 = 0
-    var joint12 = 0
-    var joint13 = 0
-    var joint14 = 0
-    var joint15 = 0
-    var joint21 = 0
-    var joint22 = 0
-    var joint23 = 0
-    var joint24 = 0
-    var joint25 = 0
-    var joint31 = 0
-    var joint32 = 0
-    var joint33 = 0
-    var joint34 = 0
-    var joint35 = 0
-    var joint41 = 0
-    var joint42 = 0
-    var joint43 = 0
-    var joint44 = 0
-    var joint45 = 0
-    var joint51 = 0
-    var joint52 = 0
-    var joint53 = 0
-    var joint54 = 0
-    var joint55 = 0
-    for k in range(n - 2):
-        var left = ami_bin(a[k], lo, step)
-        var right = ami_bin(a[k + 2], lo, step)
-        if left == 1:
-            row1 += 1
-            if right == 1:
-                joint11 += 1
-            elif right == 2:
-                joint12 += 1
-            elif right == 3:
-                joint13 += 1
-            elif right == 4:
-                joint14 += 1
-            else:
-                joint15 += 1
-        elif left == 2:
-            row2 += 1
-            if right == 1:
-                joint21 += 1
-            elif right == 2:
-                joint22 += 1
-            elif right == 3:
-                joint23 += 1
-            elif right == 4:
-                joint24 += 1
-            else:
-                joint25 += 1
-        elif left == 3:
-            row3 += 1
-            if right == 1:
-                joint31 += 1
-            elif right == 2:
-                joint32 += 1
-            elif right == 3:
-                joint33 += 1
-            elif right == 4:
-                joint34 += 1
-            else:
-                joint35 += 1
-        elif left == 4:
-            row4 += 1
-            if right == 1:
-                joint41 += 1
-            elif right == 2:
-                joint42 += 1
-            elif right == 3:
-                joint43 += 1
-            elif right == 4:
-                joint44 += 1
-            else:
-                joint45 += 1
-        else:
-            row5 += 1
-            if right == 1:
-                joint51 += 1
-            elif right == 2:
-                joint52 += 1
-            elif right == 3:
-                joint53 += 1
-            elif right == 4:
-                joint54 += 1
-            else:
-                joint55 += 1
-        if right == 1:
-            column1 += 1
-        elif right == 2:
-            column2 += 1
-        elif right == 3:
-            column3 += 1
-        elif right == 4:
-            column4 += 1
-        else:
-            column5 += 1
+    var counts = stack_allocation[25, Int]()
+    histogram_ami_count_range(a, 0, n - 2, lo, step, padding, counts)
+    var rows = stack_allocation[5, Int]()
+    var columns = stack_allocation[5, Int]()
+    for bin in range(5):
+        rows[bin] = 0
+        columns[bin] = 0
+    for row in range(5):
+        for column in range(5):
+            rows[row] += counts[row * 5 + column]
+            columns[column] += counts[row * 5 + column]
     var result = 0.0
-    result += ami_term(joint11, row1, column1, total)
-    result += ami_term(joint12, row1, column2, total)
-    result += ami_term(joint13, row1, column3, total)
-    result += ami_term(joint14, row1, column4, total)
-    result += ami_term(joint15, row1, column5, total)
-    result += ami_term(joint21, row2, column1, total)
-    result += ami_term(joint22, row2, column2, total)
-    result += ami_term(joint23, row2, column3, total)
-    result += ami_term(joint24, row2, column4, total)
-    result += ami_term(joint25, row2, column5, total)
-    result += ami_term(joint31, row3, column1, total)
-    result += ami_term(joint32, row3, column2, total)
-    result += ami_term(joint33, row3, column3, total)
-    result += ami_term(joint34, row3, column4, total)
-    result += ami_term(joint35, row3, column5, total)
-    result += ami_term(joint41, row4, column1, total)
-    result += ami_term(joint42, row4, column2, total)
-    result += ami_term(joint43, row4, column3, total)
-    result += ami_term(joint44, row4, column4, total)
-    result += ami_term(joint45, row4, column5, total)
-    result += ami_term(joint51, row5, column1, total)
-    result += ami_term(joint52, row5, column2, total)
-    result += ami_term(joint53, row5, column3, total)
-    result += ami_term(joint54, row5, column4, total)
-    result += ami_term(joint55, row5, column5, total)
+    for row in range(5):
+        for column in range(5):
+            result += ami_term(
+                counts[row * 5 + column], rows[row], columns[column], total
+            )
     return result
 
 
@@ -475,7 +394,16 @@ def mcc_histogram_ami(a: Int, n: Int) abi("C") -> Float64:
         return 0.0 / 0.0
     if invalid(p(a), n):
         return 0.0 / 0.0
-    return histogram_ami(p(a), n)
+    return histogram_ami(p(a), n, 0.1)
+
+
+@export("mcc_histogram_ami_raw")
+def mcc_histogram_ami_raw(a: Int, n: Int, scale: Float64) abi("C") -> Float64:
+    if a == 0 or n < 3:
+        return 0.0 / 0.0
+    if invalid(p(a), n):
+        return 0.0 / 0.0
+    return histogram_ami(p(a), n, 0.1 * scale)
 
 
 @export("mcc_trev")

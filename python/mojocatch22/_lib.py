@@ -21,6 +21,7 @@ _SIGNATURES = {
     "mcc_f1ecac": ([_P, _I], _F),
     "mcc_first_min_ac": ([_P, _I], _F),
     "mcc_histogram_ami": ([_P, _I], _F),
+    "mcc_histogram_ami_raw": ([_P, _I, _F], _F),
     "mcc_trev": ([_P, _I], _F),
     "mcc_pnn40": ([_P, _I], _F),
     "mcc_mean_longstretch1": ([_P, _I], _F),
@@ -60,13 +61,11 @@ def f64(data) -> np.ndarray:
         raise ValueError("time series must not be empty")
     if not np.isfinite(arr).all():
         raise ValueError("time series must contain only finite float64 values")
-    # Mojo receives a mutable pointer type.  Require a private writable C-order
-    # buffer even though current kernels are read-only.
-    return np.require(arr, dtype=np.float64, requirements=["C", "W"])
+    return np.require(arr, dtype=np.float64, requirements=["C"])
 
 
-def call(name: str, data) -> float:
+def call(name: str, data, *args) -> float:
     arr = f64(data)
     # arr remains strongly referenced through the native call; the C ABI receives
     # a pointer to an owned, contiguous float64 buffer and its element count.
-    return float(getattr(lib(), name)(ctypes.c_void_p(arr.ctypes.data), arr.size))
+    return float(getattr(lib(), name)(ctypes.c_void_p(arr.ctypes.data), arr.size, *args))

@@ -47,7 +47,13 @@ def CO_FirstMin_ac(data):
 
 
 def CO_HistogramAMI_even_2_5(data):
-    return call("mcc_histogram_ami", _zscore(data, min_size=3))
+    arr = f64(data)
+    if arr.size < 3:
+        raise ValueError("time series must contain at least 3 values")
+    scale = arr.std(ddof=1)
+    if scale == 0.0:
+        raise ValueError("z-scored characteristics require a non-constant time series")
+    return call("mcc_histogram_ami_raw", arr, scale)
 
 
 def CO_trev_1_num(data):
