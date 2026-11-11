@@ -44,90 +44,120 @@ also require a non-constant signal and enough samples for their calculation.
 ## Benchmark
 
 Measured by `pixi run bench` on this checkout. Timings are the best of three
-calls and include public-API conversion for both libraries. Both `mojo-catch22`
-columns come from that task: `before` runs it against the kernel library saved
-before the unroll pass (`MOJO_CATCH22_LIB=... pixi run bench`), `after` against
-the current build. Each cell is the median of fifteen runs per function, and the
-speedup column is computed from the `before` and `after` cells next to it.
+calls and include public-API conversion for both libraries. The `before` column
+runs the same task against the library saved from the build before this pass
+(`MOJO_CATCH22_LIB=... pixi run bench`), `after` against the current build. The
+machine is shared, so the before and after runs below are one run each, not
+medians of a batch: read the multipliers as one-decimal-scale, and the kernel
+table underneath as the steadier measure.
 
-| case | mojo-catch22 before | mojo-catch22 after | pycatch22 | speedup vs pycatch22 |
-| --- | ---: | ---: | ---: | ---: |
-| DN_Mean (2M) | 1.50 ms | 1.36 ms | 127.97 ms | 85.31-94.10x faster |
-| DN_Spread_Std (2M) | 3.32 ms | 2.69 ms | 116.82 ms | 35.19-43.43x faster |
-| CO_trev_1_num (2M) | 19.69 ms | 17.44 ms | 213.14 ms | 10.82-12.22x faster |
-| MD_hrv_classic_pnn40 (2M) | 19.97 ms | 18.32 ms | 159.98 ms | 8.01-8.73x faster |
-| CO_HistogramAMI_even_2_5 (200k) | 1.61 ms | 1.61 ms | 14.57 ms | 9.05x faster |
-| CO_f1ecac (4,096) | 0.11 ms | 0.11 ms | 2.94 ms | 26.73x faster |
-| DN_HistogramMode_5 (200k) | 3.89 ms | 2.03 ms | 7.83 ms | 2.01-3.86x faster |
-| DN_HistogramMode_10 (200k) | 6.00 ms | 2.05 ms | 7.42 ms | 1.24-3.62x faster |
-| SB_BinaryStats_mean_longstretch1 (2M) | 24.00 ms | 22.23 ms | 170.33 ms | 7.10-7.66x faster |
-| SB_BinaryStats_diff_longstretch0 (2M) | 19.87 ms | 20.25 ms | 158.16 ms | 7.81-7.96x faster |
-| FC_LocalSimple_mean1_tauresrat (4,096) | 0.17 ms | 0.13 ms | 5.79 ms | 34.06-44.54x faster |
+| case | mojo-catch22 before | mojo-catch22 after | pycatch22 | after vs before | after vs pycatch22 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DN_Mean (2M) | 1.32 ms | 1.39 ms | 131.12 ms | 0.95x | 94.49x faster |
+| DN_Spread_Std (2M) | 2.70 ms | 2.24 ms | 132.05 ms | 1.21x | 58.99x faster |
+| CO_trev_1_num (2M) | 19.21 ms | 15.14 ms | 214.77 ms | 1.27x | 14.18x faster |
+| MD_hrv_classic_pnn40 (2M) | 16.19 ms | 15.87 ms | 168.94 ms | 1.02x | 10.64x faster |
+| CO_HistogramAMI_even_2_5 (200k) | 1.59 ms | 1.45 ms | 17.06 ms | 1.10x | 11.75x faster |
+| CO_f1ecac (4,096) | 0.12 ms | 0.10 ms | 3.13 ms | 1.20x | 31.81x faster |
+| DN_HistogramMode_5 (200k) | 1.91 ms | 1.87 ms | 10.29 ms | 1.02x | 5.49x faster |
+| DN_HistogramMode_10 (200k) | 1.90 ms | 1.90 ms | 10.30 ms | 1.00x | 5.42x faster |
+| SB_BinaryStats_mean_longstretch1 (2M) | 19.91 ms | 20.16 ms | 182.24 ms | 0.99x | 9.04x faster |
+| SB_BinaryStats_diff_longstretch0 (2M) | 18.45 ms | 18.72 ms | 168.05 ms | 0.99x | 8.98x faster |
+| FC_LocalSimple_mean1_tauresrat (4,096) | 0.17 ms | 0.11 ms | 5.75 ms | 1.55x | 51.59x faster |
 
-This machine is shared, so end-to-end numbers drift by tens of percent between
-runs. `MD_hrv_classic_pnn40` and `SB_BinaryStats_diff_longstretch0` in
-particular vary by more than the change does, which is why their `before` and
-`after` cells can invert direction from run to run. A second comparison on
-identical buffers in one process (native kernels only, z-score precomputed)
-is the steadier measure of kernel work:
+`DN_Mean`, `CO_trev_1_num`, `MD_hrv_classic_pnn40` and the two longstretch
+features are timed through the public API on the *unnormalised* input, so a
+large part of each cell is numpy's z-score in `_zscore`, which this pass does not
+touch; the kernel-only table below is what reflects the kernels. The longstretch
+features in particular show no end-to-end change even though their kernel is
+~1.2x faster, because the rest of the call dominates.
 
-| native kernel | input | before | after |
-| --- | --- | ---: | ---: |
-| DN_Mean | 2M | 0.610 ms | 0.490 ms |
-| DN_Spread_Std | 2M | 1.615 ms | 1.004 ms |
-| CO_trev_1_num | 2M | 1.926 ms | 1.667 ms |
-| MD_hrv_classic_pnn40 | 2M | 1.806 ms | 1.782 ms |
-| DN_HistogramMode_5 | 200k | 2.525 ms | 0.711 ms |
-| DN_HistogramMode_10 | 200k | 4.704 ms | 0.708 ms |
-| CO_HistogramAMI_even_2_5 | 200k | 0.896 ms | 0.898 ms |
+Kernel-only, on identical buffers in one process, both libraries alternating
+best-of-21 (`MOJO_CATCH22_BEFORE=... pixi run python bench/ab_kernels.py`):
 
-All seven features that use the changed kernels, called together the way
-`catch22_all` does (numpy z-score included), measure, per size, `after` then
-`before`:
+| kernel | input | before | after | speedup | result agreement |
+| --- | ---: | ---: | ---: | ---: | --- |
+| DN_Mean | 2,000,000 | 489.5 us | 489.9 us | 1.00x | bitwise |
+| DN_Spread_Std | 2,000,000 | 997.9 us | 511.4 us | 1.95x | within 2.1e-15 |
+| CO_trev_1_num | 2,000,000 | 1.7 ms | 0.7 ms | 2.36x | bitwise |
+| MD_hrv_classic_pnn40 | 2,000,000 | 1.8 ms | 0.8 ms | 2.37x | bitwise |
+| DN_HistogramMode_5 | 200,000 | 701.4 us | 580.7 us | 1.21x | bitwise |
+| DN_HistogramMode_10 | 200,000 | 689.2 us | 582.9 us | 1.18x | bitwise |
+| SB_BinaryStats_mean_longstretch1 | 2,000,000 | 4.7 ms | 3.9 ms | 1.21x | bitwise |
+| SB_BinaryStats_diff_longstretch0 | 2,000,000 | 4.3 ms | 3.4 ms | 1.27x | bitwise |
+| CO_HistogramAMI_even_2_5 | 200,000 | 895.6 us | 708.3 us | 1.26x | bitwise |
+| CO_f1ecac | 4,096 | 32.7 us | 6.3 us | 5.23x | bitwise |
+| CO_FirstMin_ac | 4,096 | 65.5 us | 12.1 us | 5.39x | bitwise |
+| FC_LocalSimple_mean1_tauresrat | 4,096 | 88.7 us | 31.7 us | 2.80x | bitwise |
+| FC_LocalSimple_mean3_stderr | 200,000 | 795.7 us | 120.8 us | 6.59x | within 2.2e-15 |
 
-| input | after | before |
-| --- | ---: | ---: |
-| n=4,096 | 0.13 ms | 0.28 ms |
-| n=200k | 4.81 ms | 10.73 ms |
-| n=2M | 50.4 ms | 111.7 ms |
-
-`pixi run bench` now also covers `DN_HistogramMode_5/10`,
-`SB_BinaryStats_mean_longstretch1`, `SB_BinaryStats_diff_longstretch0` and
-`FC_LocalSimple_mean1_tauresrat`, and `pixi run bench -- --kernel` prints the
-native-kernel table with the current build filled in.
+`DN_Spread_Std` and `FC_LocalSimple_mean3_stderr` no longer produce bit-identical
+values because their sums are now accumulated raw and centred at the end; the
+difference is 2e-15 relative, far inside the 2e-8 test tolerance. Everything else
+is bitwise identical to the previous build.
 
 ## How it works
 
 The Mojo kernels live in `src/capi.mojo` and are built as one shared library.
-Contiguous reductions use the host's native Float64 SIMD width with scalar tails
-and four independent partial accumulators, combined once after the loop so the
-adds do not serialise on floating-point latency. `histogram_mode` counts every
-bin in a single pass instead of re-scanning the series once per bin.
-The Python wrapper validates the array, retains its contiguous `float64` buffer
-for the whole `ctypes` call, and passes its address and element count to the C
-ABI. The AMI kernel applies z-score scaling to its bin boundaries instead of
-allocating a normalized copy, and classifies bins with SIMD before reducing its
-25 counters. Kernels do not allocate or retain the caller's memory.
-Autocorrelation is calculated directly over that buffer; unsupported upstream
-features are not silently substituted.
+Contiguous reductions use the host's native Float64 SIMD width (4 lanes here)
+with scalar tails. The two-pass reductions — mean/std, the square-deviation sum
+and `FC_LocalSimple_mean3_stderr` — add with four independent partial
+accumulators. Where two stages read the same buffer, this pass fused them into
+one pass:
 
-The multi-accumulator reductions change the order of floating-point summation,
-so reductions can differ from an earlier build, or from pycatch22, in the last
-bits. Test tolerances are unchanged. Two things this pass did *not* do:
+- Mean and standard deviation are computed in a single pass. The mean is not
+  known until the end, so raw `x` and `x*x` sums are accumulated together and
+  the centred sum is recovered as `Σx² - 2mΣx + nm²`. `DN_Spread_Std` re-reads
+  the series once instead of twice.
+- `FC_LocalSimple_mean3_stderr` fused its mean pass and its residual pass over
+  the same sliding window, using the same raw-moment trick.
+- The finite-value scan that every kernel runs before starting is itself
+  vectorised, and `histogram_mode` computes the range it needs with one combined
+  minimum/maximum pass instead of two, as does AMI.
+- Autocorrelation no longer recomputes the mean and the zero-lag divisor for
+  every lag: `CO_f1ecac`, `CO_FirstMin_ac` and `FC_LocalSimple_mean1_tauresrat`
+  compute them once per call and then run one fused numerator pass per lag.
 
-- `DN_HistogramMode_5` and `DN_HistogramMode_10` remain identical to an earlier
-  build. In theory the single counting pass can disagree with the old per-bin
-  re-scan by one bin, but only if a sample sat exactly on a bin boundary where
-  the two forms of the index expression round differently. A 4,000-case random
-  sweep, and the whole suite, found no such value. Quantised input does not
-  reproduce the cases where these two kernels differ from pycatch22 (they
-  already differed from it on such input before this pass, and the two builds
-  agree with each other there).
-- No new vector form was introduced this pass. Every kernel keeps the SIMD shape
-  it already had, including `CO_trev_1_num` and the SIMD slice of `pnn40`;
-  `pnn40`'s scalar tail still counts its comparison in scalar form. The change
-  is in loop structure, accumulator count and pass count. Broader SIMD work is
-  the next phase.
+`histogram_mode` counts every bin in a single pass instead of re-scanning the
+series once per bin. The Python wrapper validates the array, retains its
+contiguous `float64` buffer for the whole `ctypes` call, and passes its address
+and element count to the C ABI. The AMI kernel applies z-score scaling to its
+bin boundaries instead of allocating a normalized copy, and classifies bins with
+SIMD before reducing its 25 counters. Kernels do not allocate or retain the
+caller's memory. Autocorrelation is calculated directly over that buffer;
+unsupported upstream features are not silently substituted.
+
+The buffers are the ones the FFI is handed: `_lib.f64` runs the array through
+`np.require(..., requirements=["C"])`, so every kernel sees a contiguous
+`float64` array at least 8-byte aligned, and the SIMD loads are unaligned
+(`unsafe_load[width=W]`), which needs no stronger promise. Every loop bound is
+written so the vector body stays within the element count and the scalar tail
+finishes the remainder.
+
+The multi-accumulator and raw-moment reductions change the order of
+floating-point summation. `DN_Spread_Std` and `FC_LocalSimple_mean3_stderr`
+therefore differ from the previous build by about 2e-15 relative; every other
+kernel is bitwise identical. Test tolerances are unchanged. Every SIMD kernel is
+tested at lengths 0, 1, W-1, W, W+1 and 12345 (W = 4 on this machine) against
+pycatch22, so both the full-vector body and the scalar tail are exercised.
+Those tests also cover edge behaviour the existing suite never reached: every
+kernel is now called at lengths 0, 1, W-1, W and W+1, and the wrappers reject
+only the lengths they document. Where pycatch22 itself corrupts the heap (it
+does on an empty input), this port raises `ValueError` instead.
+
+This pass tried and **reverted** two further vectorisations because the
+benchmark did not show a gain at real caller sizes:
+
+- `SB_BinaryStats_mean_longstretch1` and `SB_BinaryStats_diff_longstretch0`:
+  classifying lanes with a vector compare and a per-lane flag test compiled to a
+  longer dependency chain than the committed scalar loop. A backward
+  "largest matching index" vector scan was much faster in isolation but could
+  not be made to reproduce the scalar reduction correctly under the pinned
+  compiler, so it was dropped; the committed scalar loop is kept. What they do
+  gain (about 1.2x) includes the vectorised finite-value scan they share with
+  every other kernel, so it is not all attributable to these two loops.
+- A branchless lane-select form of the same stretch update does not parse on
+  the pinned compiler, so it was not retained.
 
 GPU offload is intentionally omitted. The covered kernels are streaming
 reductions, comparisons, and small histograms with arithmetic intensity below
