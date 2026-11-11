@@ -1,4 +1,5 @@
 import ctypes
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -163,3 +164,43 @@ def test_native_abi_rejects_null_and_short_buffers():
     native = lib()
     assert np.isnan(native.mcc_mean(ctypes.c_void_p(), 0))
     assert np.isnan(native.mcc_mean3_stderr(ctypes.c_void_p(), 4))
+
+
+# The task-parallel path is reverted (see README, Parallelism). The library still
+# exports the chunked mean so the benchmark can reproduce that result, and this
+# test pins what a parallel path may never break: splitting the buffer across
+# workers must agree with the serial kernel on the same input. Sizes cover below
+# any plausible threshold, the 256k crossover proposal, a partial last chunk, and
+# a large odd length.
+@pytest.mark.parametrize("n", [4_096, 262_144, 262_149, 1_000_003])
+@pytest.mark.parametrize("workers", [2, 4, 8])
+def test_parallel_and_serial_mean_agree(n, workers):
+    x = _tail_series(n)
+    serial = lib().mcc_mean(ctypes.c_void_p(x.ctypes.data), x.size)
+    parallel = lib().mcc_mean_taskparallel(ctypes.c_void_p(x.ctypes.data), x.size, workers)
+    # Chunks sum in a different order, so this cannot be expected to be bitwise.
+    # Measured on these inputs: about 1e-17 at 4,096 and 262,144, and 1.2e-8 to
+    # 2.7e-7 at 262,149 and 1,000,003, where chunk slices differ in length. The
+    # bound is 1e-7 * max|x| — roughly 20% above the worst gap measured — not the
+    # suite's relative 2e-8, which is meaningless against a mean near zero.
+    tolerance = 1e-7 * float(np.abs(x).max())
+    assert parallel == pytest.approx(serial, abs=tolerance)
+    assert mojo.DN_Mean(x) == serial
+
+
+def test_no_kernel_uses_the_unavailable_parallel_imports():
+    source = (Path(__file__).resolve().parents[1] / "src" / "capi.mojo").read_text()
+    assert "from std.algorithm import parallelize" not in source
+    assert "from std.threading" not in source
+    imports = [line for line in source.splitlines() if "parallelize" in line and line.startswith("from ")]
+    assert imports == ["from max.algorithm import parallelize"]
+
+
+def test_parallel_dispatch_probe_is_bounded():
+    """The benchmark-only dispatch probe must not be usable as a worker-count
+    escape hatch: out-of-range counts report NaN instead of launching."""
+    x = _tail_series(64)
+    pointer = ctypes.c_void_p(x.ctypes.data)
+    assert lib().mcc_parallel_dispatch_us(pointer, x.size, 2, 2) > 0.0
+    for workers in (0, 9):
+        assert np.isnan(lib().mcc_parallel_dispatch_us(pointer, x.size, workers, 2))

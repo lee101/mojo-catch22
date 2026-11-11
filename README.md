@@ -96,6 +96,95 @@ values because their sums are now accumulated raw and centred at the end; the
 difference is 2e-15 relative, far inside the 2e-8 test tolerance. Everything else
 is bitwise identical to the previous build.
 
+## Parallelism
+
+**The parallel path was built, measured, and reverted.** Nothing in this checkout
+calls `parallelize`; the serial kernels are what ship. What follows is why.
+
+The API was `parallelize` from `max.algorithm` (the `std.algorithm` and
+`std.threading` forms do not compile on the pinned `1.2.0.dev2026092605`
+toolchain), behind a size threshold, capped at 4 workers. `mean` was converted
+first as the cheapest kernel: split the buffer into 4 contiguous chunks on a
+`4*W` granule boundary, reduce each chunk in a worker, sum the partial means.
+When the chunk size divides the length the result differs by only rounding
+(about 1e-17 absolute on the mean). When it does not — the last chunk is a short
+tail — each partial is taken over a differently sized slice and the gap grows:
+up to 2.74e-7 absolute on a signal peaking near 5. That is still tiny, but it is
+why the parallel test compares with a bound of `1e-7 * max|x|` instead of the
+suite's relative 2e-8, which is useless for a mean that sits near zero.
+
+The blocker is dispatch cost, not the arithmetic. From a ctypes host, **one**
+`parallelize` call costs about **4.6 ms** (best of 9, measured 4.58–4.80 ms;
+`lib().mcc_parallel_dispatch_us(pointer, n, workers, items)`):
+
+| workers | work items | one parallelize call |
+| ---: | ---: | ---: |
+| 2 | 2 | 4,800 us |
+| 2 | 8 | 4,715 us |
+| 2 | 64 | 4,689 us |
+| 4 | 2 | 4,581 us |
+| 4 | 8 | 4,720 us |
+| 4 | 64 | 4,655 us |
+
+Sixty-four work items cost the same as two, and four workers cost the same as
+two: the cost is the task runtime waking workers per call, not per item, and no
+split of the work avoids it. (A control where one worker reduces the whole
+buffer through `parallelize` also cost that much.) A kernel that runs through
+`parallelize` once per call therefore has to recover over 4 ms, and it does not:
+below roughly a million elements the serial kernel has already finished by then.
+
+`bench/parallel_ab.py` runs the committed serial kernel and a measurement-only
+copy of the reverted path (`mcc_mean_taskparallel`) alternately on one buffer,
+so both see the same host. The two symbols `mcc_mean_taskparallel` and
+`mcc_parallel_dispatch_us` are the only parallel code in the library, both
+benchmark-only. One
+run, from this checkout (that day the host was not throttled — cgroup
+`nr_throttled` stayed at 0 — but was heavily loaded, load1 around 18. The two
+runs taken give the same ordering, with the serial columns moving by up to 20%
+between them and the parallel columns by much more):
+
+| n | workers | serial | parallel | serial / parallel, best | median | rounds won by parallel | max abs gap |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 262,144 | 1 (control) | 64,808 us | 65,171 us | - | - | - | bitwise |
+| 262,144 | 2 | 64,808 us | 4,857,984 us | 0.02x | 0.01x | 0/7 | 5e-18 |
+| 262,144 | 4 | 64,808 us | 5,178,100 us | 0.01x | 0.01x | 0/7 | 7.6e-18 |
+| 262,144 | 8 | 64,808 us | 10,018,403 us | 0.01x | 0.01x | 0/7 | 7.6e-18 |
+| 2,000,000 | 1 (control) | 489,398 us | 486,308 us | - | - | - | bitwise |
+| 2,000,000 | 2 | 489,398 us | 5,282,871 us | 0.11x | 0.10x | 0/7 | 8.1e-19 |
+| 2,000,000 | 4 | 489,398 us | 4,753,845 us | 0.12x | 0.10x | 0/7 | 9.9e-18 |
+| 2,000,000 | 8 | 489,398 us | 4,673,987 us | 0.13x | 0.11x | 0/7 | 1.1e-18 |
+| 8,000,000 | 1 (control) | 5,925,096 us | 5,366,734 us | - | - | - | bitwise |
+| 8,000,000 | 2 | 5,925,096 us | 9,033,382 us | 0.75x | 0.53x | 0/7 | 4.3e-19 |
+| 8,000,000 | 4 | 5,925,096 us | 8,704,001 us | 0.73x | 0.64x | 0/7 | 8.7e-19 |
+| 8,000,000 | 8 | 5,925,096 us | 7,571,128 us | 0.90x | 0.73x | 0/7 | 4.4e-18 |
+
+At 1, 2, 4 and 8 workers the parallel path loses **every** round at every size.
+It does not flatten out and it does not recover with more workers: going 2 → 4 →
+8 is 4.86 → 5.18 → 10.02 ms at 256k and 9.03 → 8.70 → 7.57 ms at 8M — jumps
+around the dispatch cost, not scaling. The best cell in the table, 8M at 8
+workers, is still 1.3x *slower* than serial. Both paths agreed to 1e-17 or
+better in every row, so correctness was never the problem.
+
+The full before/after on `mcc_mean` from the frozen pre-change library, same
+process, best of 15, one run: 4,096 elements 1.6 → 1.6 us; 200,000 47.6 → 49.5 us
+(below any threshold, unchanged); 262,144 **85.5 → 5,156.8 us**; 1,000,000
+**254.8 → 4,809.3 us**; 2,000,000 **603.2 → 5,189.0 us**. Shipped, it would have
+made 256k-scale callers about 20x *slower* and million-element callers about
+10x slower. That run happened to cross a spell of host contention around the 2M
+row, so its serial 2M and 8M figures are not reusable — the paired table above
+is the one to read — but the direction held in every measurement taken, and the
+paired table shows the same conclusion at all three sizes.
+
+So `mcc_mean` is back to the serial kernel, there is no threshold to tune, and
+the only parallel code left is `mcc_mean_taskparallel`, compiled in so the table
+above can be reproduced from this checkout: `MCC_SIZES=262144,2000000,8000000
+flock /tmp/mojo-bench.lock pixi run python bench/parallel_ab.py`. `max` is now a
+pinned dependency (`max ==26.7.0.dev2026092605`, alongside the mojo pin) so that
+symbol builds and so a future attempt starts from a compiling `max.algorithm`
+import rather than rediscovering that it moved. To retry: convert one kernel
+behind a threshold, then run `bench/parallel_ab.py` before touching the README —
+if it does not win the paired rounds at real caller sizes, revert it again.
+
 ## How it works
 
 The Mojo kernels live in `src/capi.mojo` and are built as one shared library.
@@ -158,6 +247,11 @@ benchmark did not show a gain at real caller sizes:
   every other kernel, so it is not all attributable to these two loops.
 - A branchless lane-select form of the same stretch update does not parse on
   the pinned compiler, so it was not retained.
+- Task parallelism through `max.algorithm.parallelize`: built for `DN_Mean`,
+  measured through 1/2/4/8 workers at 256k, 2M and 8M elements, and reverted
+  because one dispatch costs ~4.6 ms and the parallel path lost every paired
+  round to the serial kernel. The table and the reasons are in the
+  **Parallelism** section above.
 
 GPU offload is intentionally omitted. The covered kernels are streaming
 reductions, comparisons, and small histograms with arithmetic intensity below

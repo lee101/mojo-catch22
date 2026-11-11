@@ -15,6 +15,9 @@ _F = ctypes.c_double
 
 _SIGNATURES = {
     "mcc_mean": ([_P, _I], _F),
+    # Benchmark-only; see the README. Not called by the API.
+    "mcc_mean_taskparallel": ([_P, _I, _I], _F),
+    "mcc_parallel_dispatch_us": ([_P, _I, _I, _I], _F),
     "mcc_std": ([_P, _I], _F),
     "mcc_histogram_mode_5": ([_P, _I], _F),
     "mcc_histogram_mode_10": ([_P, _I], _F),

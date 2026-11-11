@@ -1,10 +1,19 @@
 """Allocation-free C ABI kernels for the covered catch22 characteristics."""
 
+from max.algorithm import parallelize
 from std.math import exp, isnan, log, sqrt
 from std.memory import stack_allocation
 from std.sys import simd_width_of
+from std.time import perf_counter_ns
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
+
+# Task parallelism. `parallelize` lives in `max.algorithm` on this toolchain;
+# the `std.algorithm` and `std.threading` forms do not compile. The kernels do
+# NOT use it: the parallel path was built, measured, and reverted — a chunked
+# kernel launch costs milliseconds on this toolchain and loses to the serial
+# kernel at every caller size. `mcc_mean_taskparallel` below is kept only so
+# the benchmark can reproduce that measurement. See the README.
 
 
 def invalid(a: Ptr, n: Int) -> Bool:
@@ -571,6 +580,75 @@ def mcc_mean(a: Int, n: Int) abi("C") -> Float64:
     if a == 0 or n < 1:
         return 0.0 / 0.0
     return mean(p(a), n)
+
+
+@export("mcc_mean_taskparallel")
+def mcc_mean_taskparallel(a: Int, n: Int, workers: Int) abi("C") -> Float64:
+    """Benchmark-only: the reverted task-parallel mean, with the serial kernel.
+
+    This is the shape a chunked mean had: split `a[:n]` into `workers`
+    contiguous chunks at a 4*W granule boundary, run each chunk through a
+    `max.algorithm.parallelize` worker, and sum the partial means. Each work
+    item calls the committed serial `mean`. It exists so `bench/parallel_ab.py`
+    can time "what parallelizing this kernel would cost" on the same buffers as
+    the serial kernel; see the README for the result. Never used by the API.
+    """
+    if a == 0 or n < 1 or workers < 1 or workers > 8:
+        return 0.0 / 0.0
+    comptime GRANULE = 4 * simd_width_of[DType.float64]()
+    var size = n // workers
+    var source = p(a)
+    if size < GRANULE:
+        return mean(source, n)
+    size = Int(size // GRANULE) * GRANULE
+    var count = Int(n // size)
+    var partials = stack_allocation[9, Float64]()
+    for k in range(count):
+        partials.unsafe_store(k, 0.0)
+
+    def work(pid: Int) {imm}:
+        var start = Int(pid) * size
+        var end = start + size
+        if pid == count - 1:
+            end = n
+        partials.unsafe_store(pid, mean(source + start, end - start))
+
+    var active = workers
+    if count < workers:
+        active = count
+    parallelize(work, count, active)
+    var total = 0.0
+    for k in range(count):
+        total += partials.unsafe_load(k)
+    return total / Float64(count)
+
+
+@export("mcc_parallel_dispatch_us")
+def mcc_parallel_dispatch_us(a: Int, n: Int, workers: Int, items: Int) abi("C") -> Float64:
+    """Benchmark-only: microseconds one `parallelize` call costs from a ctypes host.
+
+    Each work item reads one element, so what is measured is the task runtime
+    waking workers per call, not kernel work. `items` varies how the work is
+    split; `workers` is the worker count. Never used by the API.
+    """
+    if a == 0 or n < 1 or workers < 1 or workers > 8 or items < 1:
+        return 0.0 / 0.0
+    var partials = stack_allocation[9, Float64]()
+    for k in range(workers):
+        partials.unsafe_store(k, 0.0)
+    var source = p(a)
+
+    def work(pid: Int) {imm}:
+        var slot = Int(pid) % n
+        partials.unsafe_store(Int(pid) % workers, source.unsafe_load(slot))
+
+    var repeats = 9
+    var best = Float64(1.0e18)
+    for _ in range(repeats):
+        var start = perf_counter_ns()
+        parallelize(work, items, workers)
+        best = min(best, Float64(perf_counter_ns() - start) / 1.0e3)
+    return best
 
 
 @export("mcc_std")
