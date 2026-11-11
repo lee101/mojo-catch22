@@ -253,10 +253,115 @@ benchmark did not show a gain at real caller sizes:
   round to the serial kernel. The table and the reasons are in the
   **Parallelism** section above.
 
-GPU offload is intentionally omitted. The covered kernels are streaming
-reductions, comparisons, and small histograms with arithmetic intensity below
-the roughly 2-flop-per-byte point where device transfer and launch overhead can
-be justified.
+## GPU
+
+**CPU only: memory-bound.** No kernel in this port ships a device path, and that
+is the gate's answer, not a gap left open. Nothing in `src/capi.mojo` imports
+`max.gpu`; `bench/gpu_probe.mojo` (driven by `bench/gpu_probe.py`) is the
+measurement-only evidence for this section and exports nothing.
+
+The gate is arithmetic intensity: a kernel is only a GPU candidate above roughly
+2 floating-point operations per byte of input it reads. A `float64` element is 8
+bytes, so the bar is about 16 flops per element. Counted from the committed
+kernels in `src/capi.mojo`, the heaviest pass is `FC_LocalSimple_mean3_stderr`
+at about 5 flops per element (0.63 flops/byte). There is no `bench/analysis.md`
+in this checkout and none in its history, so the counts below are taken from the
+kernel bodies rather than quoted from a separate analysis; each is per input
+element that the kernel reads, with the comparisons and the bin arithmetic
+counted as one operation each:
+
+| kernel | dominant work per element | flops/byte | gate |
+| --- | --- | ---: | --- |
+| `FC_LocalSimple_mean3_stderr` | window sum, residual, square, two accumulations | 0.63 | below |
+| `CO_trev_1_num` | difference, two multiplies, add | 0.50 | below |
+| `MD_hrv_classic_pnn40` | difference, scale, two compares | 0.50 | below |
+| `CO_f1ecac`, `CO_FirstMin_ac`, `FC_LocalSimple_mean1_tauresrat` | two differences, multiply, add, per lag pass | 0.50 | below |
+| `CO_HistogramAMI_even_2_5` | eight compares, bin select, counter | 0.25 | below |
+| `DN_HistogramMode_5/10` | subtract, divide, clamp, counter | 0.38 | below |
+| `DN_Mean`, `DN_Spread_Std` | add (and multiply-add) | 0.25 | below |
+| `SB_BinaryStats_*_longstretch*` | difference, compare | 0.13 | below |
+
+The autocorrelation family is the one case worth naming: its *total* work is
+O(n²), but that comes from repeating a pass that is itself 0.5 flops/byte, one
+pass per lag, re-reading the same buffer each time. Aggregate work grows with
+n; arithmetic intensity per byte read does not, which is what the gate asks
+about.
+
+### Measured round-trip cost
+
+The gate alone would be an assumption, so the device cost was measured on this
+host (NVIDIA GeForce RTX 5090, 32,607 MiB total, 5,500–6,292 MiB free during
+these runs — above the 4,000 MiB floor, so the phase was not skipped on memory
+grounds). `pixi run python bench/gpu_probe.py`, one run, 101 timed rounds each,
+best of the rounds. The kernel is a grid-strided copy-and-scale: as close to no
+arithmetic as a kernel can be, so these are the floor a real kernel pays *on top
+of* its own compute.
+
+| elements | full round trip, best | round trip, mean | copy in + sync | launch + sync |
+| ---: | ---: | ---: | ---: | ---: |
+| 4,096 | 34.3 us | 41.3 us | 13.4 us | 11.0 us |
+| 200,000 | 553.9 us | 1,260.0 us | 227.6 us | 9.9 us |
+| 2,000,000 | 3,512.6 us | 4,234.8 us | 1,392.2 us | 15.4 us |
+
+The host is shared and the spread is real: repeat runs of the same probe gave
+21.3–34.3 us at 4,096, 440.0–553.9 us at 200,000 and 3,350.3–3,512.6 us at
+2,000,000 for the best round trip. Read these as one-decimal-scale, the same way
+the **Benchmark** section's numbers are meant to be read; the conclusion below
+holds across the whole spread, not at one point in it.
+
+Against the committed CPU kernels, same buffers, best of 25 calls through the
+native ABI (`mcc_*` symbols directly, z-score precomputed where the kernel needs
+it), one run:
+
+| kernel | 4,096 CPU | 200,000 CPU | 2,000,000 CPU | GPU floor at 2M |
+| --- | ---: | ---: | ---: | ---: |
+| `DN_Mean` | 1.9 us | 58.4 us | 564.4 us | 3,512.6 us |
+| `DN_Spread_Std` | 2.2 us | 60.7 us | 584.5 us | 3,512.6 us |
+| `CO_trev_1_num` | 2.9 us | 85.0 us | 826.8 us | 3,512.6 us |
+| `MD_hrv_classic_pnn40` | 3.1 us | 97.5 us | 947.1 us | 3,512.6 us |
+| `DN_HistogramMode_5` | 18.0 us | 724.7 us | 6,462.2 us | 3,512.6 us |
+| `CO_HistogramAMI_even_2_5` | 19.6 us | 862.0 us | 7,423.7 us | 3,512.6 us |
+| `SB_BinaryStats_mean_longstretch1` | 10.3 us | 466.5 us | 4,120.2 us | 3,512.6 us |
+| `FC_LocalSimple_mean3_stderr` | 4.1 us | 146.1 us | 1,239.4 us | 3,512.6 us |
+
+The 4,096 and 200,000 columns are the sizes the benchmark and the autocorrelation
+tests actually call, so those are the caller sizes that matter here. At 200,000
+— the size `CO_HistogramAMI_even_2_5` and `DN_HistogramMode_*` are benchmarked at
+— the cheapest possible round trip is 553.9 us against an 862.0 us CPU kernel:
+the transfer alone consumes 64% of the budget, before the kernel does any work,
+and on the faster repeat run (440.0 us) it is still 51%. At 4,096 the floor is
+34.3 us against a 19.6 us CPU kernel — the round trip alone is 1.8x the entire
+CPU call. At 2,000,000 the floor is 3,512.6 us, which is 6.2x the CPU `DN_Mean`
+and 52% of the CPU `CO_HistogramAMI_even_2_5`, the slowest kernel in the port.
+Even for that kernel there is no headroom: the device-side binning, the 25-bin
+reduction and the copy back would all have to fit inside the remaining 48%, and
+every other kernel is further away than that. That is the same conclusion the
+intensity table reaches from the other side.
+
+So the GPU path was not built. A kernel-and-gear implementation would have been
+kept only if it won at the sizes above, and the intensity ceiling says it cannot:
+the arithmetic is not there to hide the copy. The CPU path is the only path, and
+there is no threshold to tune.
+
+### Tests
+
+No GPU test exists and none was skipped: with no device path shipped there is
+nothing device-specific to assert, and `pixi run test` runs the full 223-test
+CPU suite on this host, which has the device. `bench/gpu_probe.py` is the only
+device-touching code in the tree, it is a benchmark rather than part of
+`pixi run test`, and it skips cleanly on a CPU-only machine: when no driver is
+present it prints `no CUDA device; probe skipped` and exits 0. That check has to
+live in the wrapper rather than in Mojo, because `DeviceContext()` aborts the
+process on a host with no driver instead of raising, so a `try:` cannot catch
+it.
+
+To re-check this decision after a toolchain or hardware change, run
+`pixi run python bench/gpu_probe.py` and compare the 4,096, 200,000 and
+2,000,000 rows against the CPU columns above. If the round trip ever falls below
+the CPU time of a single kernel at a real caller size, that kernel becomes worth
+converting; until then the numbers say CPU only.
+
+## License
 
 ## License
 
