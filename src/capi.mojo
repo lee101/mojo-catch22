@@ -16,12 +16,23 @@ def invalid(a: Ptr, n: Int) -> Bool:
 
 def mean(a: Ptr, n: Int) -> Float64:
     comptime W = simd_width_of[DType.float64]()
-    var acc = SIMD[DType.float64, W](0.0)
+    # Four independent partial sums: one accumulator would serialise on
+    # floating-point add latency (about four cycles per add on this machine).
+    var acc0 = SIMD[DType.float64, W](0.0)
+    var acc1 = SIMD[DType.float64, W](0.0)
+    var acc2 = SIMD[DType.float64, W](0.0)
+    var acc3 = SIMD[DType.float64, W](0.0)
     var i = 0
+    while i + 4 * W <= n:
+        acc0 += a.unsafe_load[width=W](i)
+        acc1 += a.unsafe_load[width=W](i + W)
+        acc2 += a.unsafe_load[width=W](i + 2 * W)
+        acc3 += a.unsafe_load[width=W](i + 3 * W)
+        i += 4 * W
     while i + W <= n:
-        acc += a.unsafe_load[width=W](i)
+        acc0 += a.unsafe_load[width=W](i)
         i += W
-    var total = acc.reduce_add()
+    var total = ((acc0 + acc1) + (acc2 + acc3)).reduce_add()
     while i < n:
         total += a[i]
         i += 1
@@ -32,13 +43,29 @@ def stddev(a: Ptr, n: Int) -> Float64:
     comptime W = simd_width_of[DType.float64]()
     var m = mean(a, n)
     var means = SIMD[DType.float64, W](m)
-    var acc = SIMD[DType.float64, W](0.0)
+    var acc0 = SIMD[DType.float64, W](0.0)
+    var acc1 = SIMD[DType.float64, W](0.0)
+    var acc2 = SIMD[DType.float64, W](0.0)
+    var acc3 = SIMD[DType.float64, W](0.0)
     var i = 0
+    while i + 4 * W <= n:
+        comptime for q in range(4):
+            var d = a.unsafe_load[width=W](i + q * W) - means
+            var square = d * d
+            if q == 0:
+                acc0 += square
+            elif q == 1:
+                acc1 += square
+            elif q == 2:
+                acc2 += square
+            else:
+                acc3 += square
+        i += 4 * W
     while i + W <= n:
         var d = a.unsafe_load[width=W](i) - means
-        acc += d * d
+        acc0 += d * d
         i += W
-    var total = acc.reduce_add()
+    var total = ((acc0 + acc1) + (acc2 + acc3)).reduce_add()
     while i < n:
         var tail = a[i] - m
         total += tail * tail
@@ -136,19 +163,23 @@ def histogram_mode(a: Ptr, n: Int, bins: Int) -> Float64:
     if lo == hi:
         return lo
     var step = (hi - lo) / Float64(bins)
-    var best = 0
+    var counts = stack_allocation[10, Int]()
+    for b in range(bins):
+        counts[b] = 0
+    # One pass over the series, counting every bin at once. The per-bin
+    # comparison this replaces re-scanned the whole series once per bin.
+    for i in range(n):
+        var index = Int((a[i] - lo) / step)
+        if index < 0:
+            index = 0
+        if index >= bins:
+            index = bins - 1
+        counts[index] += 1
+    var best = counts[0]
     var ties = 0
     var centers = 0.0
     for b in range(bins):
-        var count = 0
-        for i in range(n):
-            var index = Int((a[i] - lo) / step)
-            if index < 0:
-                index = 0
-            if index >= bins:
-                index = bins - 1
-            if index == b:
-                count += 1
+        var count = counts[b]
         if count > best:
             best = count
             ties = 1
@@ -263,16 +294,34 @@ def trev(a: Ptr, n: Int) -> Float64:
     if invalid(a, n):
         return 0.0 / 0.0
     comptime W = simd_width_of[DType.float64]()
-    var acc = SIMD[DType.float64, W](0.0)
+    var acc0 = SIMD[DType.float64, W](0.0)
+    var acc1 = SIMD[DType.float64, W](0.0)
+    var acc2 = SIMD[DType.float64, W](0.0)
+    var acc3 = SIMD[DType.float64, W](0.0)
     var i = 0
+    # Four independent partials over a fixed four-wide body: one chain would
+    # serialise on the multiply, multiply, add latency of the cube.
+    while i + 4 * W < n:
+        comptime for q in range(4):
+            var d = a.unsafe_load[width=W](i + q * W + 1) - a.unsafe_load[width=W](i + q * W)
+            var cube = d * d * d
+            if q == 0:
+                acc0 += cube
+            elif q == 1:
+                acc1 += cube
+            elif q == 2:
+                acc2 += cube
+            else:
+                acc3 += cube
+        i += 4 * W
     while i + W < n:
         var d = a.unsafe_load[width=W](i + 1) - a.unsafe_load[width=W](i)
-        acc += d * d * d
+        acc0 += d * d * d
         i += W
-    var total = acc.reduce_add()
+    var total = ((acc0 + acc1) + (acc2 + acc3)).reduce_add()
     while i < n - 1:
-        var tail = a[i + 1] - a[i]
-        total += tail * tail * tail
+        var d = a[i + 1] - a[i]
+        total += d * d * d
         i += 1
     return total / Float64(n - 1)
 
@@ -280,13 +329,37 @@ def trev(a: Ptr, n: Int) -> Float64:
 def pnn40(a: Ptr, n: Int) -> Float64:
     if invalid(a, n):
         return 0.0 / 0.0
-    var count = 0
-    for i in range(n - 1):
+    comptime W = simd_width_of[DType.float64]()
+    var limit = SIMD[DType.float64, W](40.0)
+    var c0 = SIMD[DType.int64, W](0)
+    var c1 = SIMD[DType.int64, W](0)
+    var c2 = SIMD[DType.int64, W](0)
+    var c3 = SIMD[DType.int64, W](0)
+    var i = 0
+    # Independent counters keep the mispredicted `> 40` test off a single
+    # dependency chain; the lane masks accumulate as integer adds.
+    while i + 4 * W < n:
+        comptime for q in range(4):
+            var d = (a.unsafe_load[width=W](i + q * W + 1) - a.unsafe_load[width=W](i + q * W)) * 1000.0
+            var hit = d.gt(limit).cast[DType.int64]() + d.lt(-limit).cast[DType.int64]()
+            if q == 0:
+                c0 += hit
+            elif q == 1:
+                c1 += hit
+            elif q == 2:
+                c2 += hit
+            else:
+                c3 += hit
+        i += 4 * W
+    while i + W < n:
+        var d = (a.unsafe_load[width=W](i + 1) - a.unsafe_load[width=W](i)) * 1000.0
+        c0 += d.gt(limit).cast[DType.int64]() + d.lt(-limit).cast[DType.int64]()
+        i += W
+    var count = ((c0 + c1) + (c2 + c3)).reduce_add()
+    while i < n - 1:
         var d = (a[i + 1] - a[i]) * 1000.0
-        if d < 0.0:
-            d = -d
-        if d > 40.0:
-            count += 1
+        count += Int64(d > 40.0 or d < -40.0)
+        i += 1
     return Float64(count) / Float64(n - 1)
 
 
