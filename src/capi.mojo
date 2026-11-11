@@ -19,7 +19,7 @@ def mean(a: Ptr, n: Int) -> Float64:
     var acc = SIMD[DType.float64, W](0.0)
     var i = 0
     while i + W <= n:
-        acc += a.load[width=W](i)
+        acc += a.unsafe_load[width=W](i)
         i += W
     var total = acc.reduce_add()
     while i < n:
@@ -35,7 +35,7 @@ def stddev(a: Ptr, n: Int) -> Float64:
     var acc = SIMD[DType.float64, W](0.0)
     var i = 0
     while i + W <= n:
-        var d = a.load[width=W](i) - means
+        var d = a.unsafe_load[width=W](i) - means
         acc += d * d
         i += W
     var total = acc.reduce_add()
@@ -55,11 +55,11 @@ def min_value(a: Ptr, n: Int) -> Float64:
                 scalar_minimum = a[i]
         return scalar_minimum
     var i = 0
-    var values = a.load[width=W](i)
+    var values = a.unsafe_load[width=W](i)
     var minimum = values
     i += W
     while i <= n - W:
-        values = a.load[width=W](i)
+        values = a.unsafe_load[width=W](i)
         minimum = min(minimum, values)
         i += W
     var value = minimum.reduce_min()
@@ -79,11 +79,11 @@ def max_value(a: Ptr, n: Int) -> Float64:
                 scalar_maximum = a[i]
         return scalar_maximum
     var i = 0
-    var values = a.load[width=W](i)
+    var values = a.unsafe_load[width=W](i)
     var maximum = values
     i += W
     while i <= n - W:
-        values = a.load[width=W](i)
+        values = a.unsafe_load[width=W](i)
         maximum = max(maximum, values)
         i += W
     var value = maximum.reduce_max()
@@ -180,8 +180,8 @@ def histogram_ami_count_range(
         counts[bucket] = 0
     var k = start
     while k + W <= end:
-        var left_values = a.load[width=W](k)
-        var right_values = a.load[width=W](k + 2)
+        var left_values = a.unsafe_load[width=W](k)
+        var right_values = a.unsafe_load[width=W](k + 2)
         var left_bins = SIMD[DType.int64, W](0)
         var right_bins = SIMD[DType.int64, W](0)
         comptime for edge in range(4):
@@ -266,7 +266,7 @@ def trev(a: Ptr, n: Int) -> Float64:
     var acc = SIMD[DType.float64, W](0.0)
     var i = 0
     while i + W < n:
-        var d = a.load[width=W](i + 1) - a.load[width=W](i)
+        var d = a.unsafe_load[width=W](i + 1) - a.unsafe_load[width=W](i)
         acc += d * d * d
         i += W
     var total = acc.reduce_add()
